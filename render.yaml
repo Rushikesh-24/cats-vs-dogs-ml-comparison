@@ -11,4 +11,6 @@ services:
       - key: IMAGE_INFERENCE_ENABLED
         value: "true"
       - key: IMAGE_MODEL_PERSISTENT
-        value: "false"
+        value: "true"
+      - key: IMAGE_MODEL_PRELOAD
+        value: "true"

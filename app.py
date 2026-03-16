@@ -10,6 +10,7 @@ app = Flask(__name__)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 IMAGE_INFERENCE_ENABLED = os.environ.get("IMAGE_INFERENCE_ENABLED", "true").lower() in ("1", "true", "yes", "on")
 IMAGE_MODEL_PERSISTENT = os.environ.get("IMAGE_MODEL_PERSISTENT", "false").lower() in ("1", "true", "yes", "on")
+IMAGE_MODEL_PRELOAD = os.environ.get("IMAGE_MODEL_PRELOAD", "true").lower() in ("1", "true", "yes", "on")
 
 # Lazy-load all models to keep startup memory low
 dt_model = None
@@ -56,6 +57,19 @@ def get_resnet_model():
             pooling="avg"
         )
     return _resnet_model
+
+
+def preload_image_models_once():
+    """Optionally warm up image models at process start."""
+    if not IMAGE_INFERENCE_ENABLED:
+        return
+
+    try:
+        get_kmeans_model()
+        if IMAGE_MODEL_PERSISTENT and IMAGE_MODEL_PRELOAD:
+            get_resnet_model()
+    except Exception as e:
+        app.logger.warning("Image model preload skipped: %s", e)
 
 
 @app.route("/")
@@ -165,3 +179,6 @@ def predict_image():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     app.run(host="0.0.0.0", port=port, debug=False)
+
+
+preload_image_models_once()
