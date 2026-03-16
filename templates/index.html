@@ -697,6 +697,9 @@
       // ── State ──
       let selectedImageBlob = null;
       let cameraStream = null;
+      let imageInferenceEnabled = true;
+
+      initRuntimeConfig();
 
       // ── Tab switching ──
       document.querySelectorAll(".tab-btn").forEach((btn) => {
@@ -734,6 +737,43 @@
           if (!payload) return;
           await submitFeatures(payload);
         });
+
+      async function initRuntimeConfig() {
+        try {
+          const res = await fetch("/config");
+          const data = await res.json();
+          imageInferenceEnabled = Boolean(data.image_inference_enabled);
+        } catch (_err) {
+          imageInferenceEnabled = true;
+        }
+
+        if (!imageInferenceEnabled) {
+          const kmeansTab = document.querySelector(
+            '.tab-btn[data-tab="kmeans"]',
+          );
+          const kmeansPanel = document.getElementById("panel-kmeans");
+          const desc = kmeansPanel?.querySelector(".panel-desc");
+
+          if (kmeansTab) {
+            kmeansTab.disabled = true;
+            kmeansTab.style.opacity = "0.45";
+            kmeansTab.style.cursor = "not-allowed";
+          }
+
+          if (desc) {
+            desc.textContent =
+              "K-Means image classification is temporarily disabled on this deployment to keep memory usage stable.";
+          }
+
+          const fileInputEl = document.getElementById("file-input");
+          const openCameraBtn = document.getElementById("start-camera-btn");
+          const classifyBtn = document.getElementById("kmeans-submit-btn");
+
+          if (fileInputEl) fileInputEl.disabled = true;
+          if (openCameraBtn) openCameraBtn.disabled = true;
+          if (classifyBtn) classifyBtn.disabled = true;
+        }
+      }
 
       function buildFeaturePayload(prefix, algorithm) {
         const fields = ["H", "W", "L", "FL", "PS", "ES"];
@@ -818,6 +858,12 @@
 
       // ── Camera ──
       async function startCamera() {
+        if (!imageInferenceEnabled) {
+          showError(
+            "Image inference is disabled on this deployment to prevent memory issues.",
+          );
+          return;
+        }
         try {
           cameraStream = await navigator.mediaDevices.getUserMedia({
             video: { facingMode: "environment" },
@@ -861,6 +907,12 @@
       }
 
       async function submitImage() {
+        if (!imageInferenceEnabled) {
+          showError(
+            "Image inference is disabled on this deployment to prevent memory issues.",
+          );
+          return;
+        }
         if (!selectedImageBlob) return;
         showSpinner();
         const formData = new FormData();

@@ -1,5 +1,5 @@
 import os
-import io
+import gc
 import joblib
 import numpy as np
 from flask import Flask, request, jsonify, render_template
@@ -8,23 +8,46 @@ from PIL import Image
 app = Flask(__name__)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+IMAGE_INFERENCE_ENABLED = os.environ.get("IMAGE_INFERENCE_ENABLED", "true").lower() in ("1", "true", "yes", "on")
+IMAGE_MODEL_PERSISTENT = os.environ.get("IMAGE_MODEL_PERSISTENT", "false").lower() in ("1", "true", "yes", "on")
 
-# Load lightweight sklearn models at startup
-dt_model = joblib.load(os.path.join(BASE_DIR, "decisiontree/decision_tree_models/decision_tree_cat_dog.pkl"))
-knn_model = joblib.load(os.path.join(BASE_DIR, "knn/knn_models/knn_cat_dog_model.pkl"))
-knn_scaler = joblib.load(os.path.join(BASE_DIR, "knn/knn_models/scaler.pkl"))
+# Lazy-load all models to keep startup memory low
+dt_model = None
+knn_model = None
+knn_scaler = None
 
-# Lazy-load heavy TensorFlow/KMeans models on first use
 _kmeans_model = None
 _resnet_model = None
 
 
-def get_kmeans_models():
-    global _kmeans_model, _resnet_model
+def get_tabular_models():
+    global dt_model, knn_model, knn_scaler
+    if dt_model is None:
+        dt_model = joblib.load(
+            os.path.join(BASE_DIR, "decisiontree/decision_tree_models/decision_tree_cat_dog.pkl")
+        )
+    if knn_model is None:
+        knn_model = joblib.load(
+            os.path.join(BASE_DIR, "knn/knn_models/knn_cat_dog_model.pkl")
+        )
+    if knn_scaler is None:
+        knn_scaler = joblib.load(
+            os.path.join(BASE_DIR, "knn/knn_models/scaler.pkl")
+        )
+    return dt_model, knn_model, knn_scaler
+
+
+def get_kmeans_model():
+    global _kmeans_model
     if _kmeans_model is None:
         _kmeans_model = joblib.load(
             os.path.join(BASE_DIR, "k-mean(clustering)/kmeans_models/cat_dog_kmeans.pkl")
         )
+    return _kmeans_model
+
+
+def get_resnet_model():
+    global _kmeans_model, _resnet_model
     if _resnet_model is None:
         import tensorflow as tf
         _resnet_model = tf.keras.applications.ResNet50(
@@ -32,12 +55,22 @@ def get_kmeans_models():
             include_top=False,
             pooling="avg"
         )
-    return _kmeans_model, _resnet_model
+    return _resnet_model
 
 
 @app.route("/")
 def index():
     return render_template("index.html")
+
+
+@app.route("/config", methods=["GET"])
+def config():
+    return jsonify(
+        {
+            "image_inference_enabled": IMAGE_INFERENCE_ENABLED,
+            "image_model_persistent": IMAGE_MODEL_PERSISTENT,
+        }
+    )
 
 
 @app.route("/predict/features", methods=["POST"])
@@ -61,13 +94,15 @@ def predict_features():
     except (KeyError, ValueError) as e:
         return jsonify({"error": f"Invalid input: {e}"}), 400
 
+    dt, knn, scaler = get_tabular_models()
+
     if algorithm == "decision_tree":
-        pred = dt_model.predict(features)[0]
-        proba = dt_model.predict_proba(features)[0]
+        pred = dt.predict(features)[0]
+        proba = dt.predict_proba(features)[0]
     else:  # knn
-        features_scaled = knn_scaler.transform(features)
-        pred = knn_model.predict(features_scaled)[0]
-        proba = knn_model.predict_proba(features_scaled)[0]
+        features_scaled = scaler.transform(features)
+        pred = knn.predict(features_scaled)[0]
+        proba = knn.predict_proba(features_scaled)[0]
 
     result = "Dog" if int(pred) == 1 else "Cat"
     confidence = round(float(max(proba)) * 100, 1)
@@ -78,6 +113,11 @@ def predict_features():
 @app.route("/predict/image", methods=["POST"])
 def predict_image():
     """Predict cat or dog from an uploaded image using K-Means + ResNet50."""
+    if not IMAGE_INFERENCE_ENABLED:
+        return jsonify({
+            "error": "Image inference is disabled on this deployment to prevent memory issues."
+        }), 503
+
     if "image" not in request.files:
         return jsonify({"error": "No image provided"}), 400
 
@@ -92,7 +132,15 @@ def predict_image():
 
     try:
         import tensorflow as tf
-        kmeans, resnet = get_kmeans_models()
+        kmeans = get_kmeans_model()
+        if IMAGE_MODEL_PERSISTENT:
+            resnet = get_resnet_model()
+        else:
+            resnet = tf.keras.applications.ResNet50(
+                weights="imagenet",
+                include_top=False,
+                pooling="avg"
+            )
 
         img_batch = np.expand_dims(img_array, axis=0)
         img_batch = tf.keras.applications.resnet50.preprocess_input(img_batch)
@@ -102,7 +150,14 @@ def predict_image():
         # Cluster mapping determined from camera_predict.py: 0 = Dog, 1 = Cat
         result = "Dog" if cluster == 0 else "Cat"
 
-        return jsonify({"result": result, "cluster": cluster})
+        response = jsonify({"result": result, "cluster": cluster})
+
+        if not IMAGE_MODEL_PERSISTENT:
+            del resnet
+            tf.keras.backend.clear_session()
+            gc.collect()
+
+        return response
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
